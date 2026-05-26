@@ -21,10 +21,27 @@ class RawRecorder(threading.Thread):
         self.stop_event = threading.Event()
         self.error = None
 
+    def _probe_params(self):
+        """Find working (samplerate, channels) for this device."""
+        channels = self.channels
+        if hasattr(self.device, 'channels'):
+            channels = min(self.channels, self.device.channels)
+
+        for sr in sorted({self.samplerate, 48000, 44100}):
+            for ch in sorted({channels, 1}):
+                try:
+                    with self.device.recorder(samplerate=sr, channels=ch):
+                        return sr, ch
+                except Exception:
+                    pass
+
+        raise Exception(f"No working audio params found for device: {self.device.name}")
+
     def run(self):
         try:
-            with sf.SoundFile(self.filepath, mode='w', samplerate=self.samplerate, channels=self.channels) as f_wav:
-                with self.device.recorder(samplerate=self.samplerate, channels=self.channels) as mic:
+            samplerate, channels = self._probe_params()
+            with sf.SoundFile(self.filepath, mode='w', samplerate=samplerate, channels=channels) as f_wav:
+                with self.device.recorder(samplerate=samplerate, channels=channels) as mic:
                     while not self.stop_event.is_set():
                         data = mic.record(numframes=2048)
                         f_wav.write(data)
