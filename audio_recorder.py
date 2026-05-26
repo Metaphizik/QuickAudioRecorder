@@ -27,15 +27,19 @@ class RawRecorder(threading.Thread):
         if hasattr(self.device, 'channels'):
             channels = min(self.channels, self.device.channels)
 
+        failures = []
         for sr in sorted({self.samplerate, 48000, 44100}):
             for ch in sorted({channels, 1}):
                 try:
                     with self.device.recorder(samplerate=sr, channels=ch):
                         return sr, ch
-                except Exception:
-                    pass
+                except Exception as e:
+                    failures.append(f"  {sr}Hz/{ch}ch: {e}")
 
-        raise Exception(f"No working audio params found for device: {self.device.name}")
+        raise Exception(
+            f"Device '{self.device.name}' rejected all parameter combinations:\n"
+            + "\n".join(failures)
+        )
 
     def run(self):
         try:
@@ -77,20 +81,27 @@ class AudioRecorder(threading.Thread):
 
     def _get_device(self, is_loopback):
         if is_loopback:
-            # For loopback, we try to find the default speaker's loopback
             default_speaker = sc.default_speaker()
             mics = sc.all_microphones(include_loopback=True)
-            # Try exact name match
             loopback_mic = next((m for m in mics if m.name == default_speaker.name), None)
-            # Try fuzzy match
             if not loopback_mic:
                 loopback_mic = next((m for m in mics if default_speaker.name in m.name), None)
-            
             if not loopback_mic:
-                raise Exception("Could not detect System Audio loopback device.")
+                available = [m.name for m in mics if m.isloopback] if any(hasattr(m, 'isloopback') for m in mics) else [m.name for m in mics]
+                raise Exception(
+                    f"No loopback device found for speaker '{default_speaker.name}'. "
+                    f"Available loopback devices: {available}"
+                )
             return loopback_mic
         else:
-            return sc.get_microphone(self.mic_id, include_loopback=False)
+            try:
+                return sc.get_microphone(self.mic_id, include_loopback=False)
+            except Exception as e:
+                available = [m.name for m in sc.all_microphones()]
+                raise Exception(
+                    f"Microphone '{self.mic_id}' not found ({e}). "
+                    f"Available: {available}"
+                ) from e
 
     def run(self):
         self.recording = True
@@ -137,7 +148,7 @@ class AudioRecorder(threading.Thread):
             for r in self.recorders:
                 r.stop()
                 if r.error:
-                    raise Exception(f"Recorder error: {r.error}")
+                    raise Exception(f"Recording failed on '{r.device.name}': {r.error}")
 
             # 4. Mix/Process
             if len(self.temp_files) == 2:
