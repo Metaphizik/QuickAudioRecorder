@@ -25,6 +25,7 @@ def resource_path(relative_path):
 
 class SignalManager(QObject):
     recording_finished = pyqtSignal(str, str)
+    recording_notice = pyqtSignal(str)
 
 class HotkeyEdit(QLineEdit):
     """
@@ -163,6 +164,15 @@ class SettingsWindow(QMainWindow):
         group_post.setLayout(layout_post)
         layout.addWidget(group_post)
 
+        # Device Handling
+        group_dev = QGroupBox("Device Handling")
+        layout_dev = QVBoxLayout()
+        self.chk_reconnect = QCheckBox("Auto-reconnect after device unplug (keep recording)")
+        self.chk_reconnect.setChecked(True)
+        layout_dev.addWidget(self.chk_reconnect)
+        group_dev.setLayout(layout_dev)
+        layout.addWidget(group_dev)
+
         # Hotkeys
         group_hotkeys = QGroupBox("Global Hotkeys")
         layout_hotkeys = QFormLayout()
@@ -225,6 +235,7 @@ class SettingsWindow(QMainWindow):
                 self.chk_clipboard.setChecked(data.get("clipboard", False))
                 self.chk_delete.setChecked(data.get("delete_after", False))
                 self.chk_delete.setEnabled(self.chk_clipboard.isChecked())
+                self.chk_reconnect.setChecked(data.get("reconnect", True))
 
                 self.hk_mic.setText(data.get("hk_mic", ""))
                 self.hk_loop.setText(data.get("hk_loop", ""))
@@ -252,6 +263,7 @@ class SettingsWindow(QMainWindow):
             "normalize": self.chk_normalize.isChecked(),
             "clipboard": self.chk_clipboard.isChecked(),
             "delete_after": self.chk_delete.isChecked(),
+            "reconnect": self.chk_reconnect.isChecked(),
             "hk_mic": self.hk_mic.text(),
             "hk_loop": self.hk_loop.text(),
             "hk_both": self.hk_both.text(),
@@ -267,6 +279,7 @@ class TrayApplication(QObject):
         
         self.signals = SignalManager()
         self.signals.recording_finished.connect(self.on_recording_finished)
+        self.signals.recording_notice.connect(self.on_recording_notice)
 
         self.icon_idle_path = resource_path("icon_idle.png")
         self.icon_rec_path = resource_path("icon_rec.png")
@@ -383,7 +396,9 @@ class TrayApplication(QObject):
             output_folder=settings['output_folder'],
             output_format=settings['format'],
             normalize=settings['normalize'],
-            on_finish_callback=finish_callback
+            on_finish_callback=finish_callback,
+            reconnect=settings['reconnect'],
+            on_notify_callback=lambda m: self.signals.recording_notice.emit(m)
         )
         self.recorder.start()
         self.action_record_mic.setEnabled(False)
@@ -397,6 +412,10 @@ class TrayApplication(QObject):
     def stop_recording(self):
         if self.recorder: self.recorder.stop()
 
+    def on_recording_notice(self, message):
+        """Mid-recording events (device lost / reconnected)."""
+        self.tray_icon.showMessage("Recording", message, QSystemTrayIcon.MessageIcon.Information, 3000)
+
     def on_recording_finished(self, path, error):
         self.action_record_mic.setEnabled(True)
         self.action_record_loop.setEnabled(True)
@@ -406,13 +425,15 @@ class TrayApplication(QObject):
         self.tray_icon.setToolTip("Simple Audio Recorder (Idle)")
         self.recorder = None
         
-        if error:
+        if error and not (path and os.path.exists(path)):
             self.tray_icon.showMessage("Error", f"Recording failed: {error}", QSystemTrayIcon.MessageIcon.Critical, 4000)
             return
-            
+
         settings = self.settings_window.get_settings()
         final_path = path
         msg = f"Saved to {os.path.basename(path)}"
+        if error:
+            msg += f"\nWarning: {error}"
         
         if settings['clipboard'] and os.path.exists(path):
             try:
