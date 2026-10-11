@@ -134,3 +134,13 @@ def test_normalize_levels_quiet_mic_against_loud_system_audio(fake_sc, tmp_path)
     mic = spectrum[np.abs(freqs - 440) < 3].max()
     system = spectrum[np.abs(freqs - 1000) < 3].max()
     assert 0.5 < mic / system < 2
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+def test_saving_reports_progress_up_to_done(fake_sc, tmp_path, normalize):
+    steps = []
+    path, error = record(tmp_path, "both", output_format="mp3", normalize=normalize,
+                         on_progress=steps.append)
+    assert not error
+    assert steps == sorted(steps)
+    assert steps[-1] == 1.0

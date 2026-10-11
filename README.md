@@ -44,7 +44,7 @@ https://github.com/user-attachments/assets/14238816-c1ee-4914-9211-5f0007bfe999
 -   **Control:**
     -   **Global Hotkeys:** Start/Stop recording from anywhere (e.g., `Ctrl+Alt+R`).
     -   **Tray Icon:** Left-click to toggle recording immediately.
-    -   **Visual Feedback:** Tray icon changes color when recording, hover it to see how long you have been recording.
+    -   **Visual Feedback:** Tray icon turns red while recording (hover it to see how long) and orange while saving, filling up as the file gets written.
     -   **Auto-Stop:** Optionally stop and save after a set number of minutes.
 
 ## Installation

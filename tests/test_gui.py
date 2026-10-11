@@ -103,3 +103,20 @@ def test_auto_stop(tray):
     tray.rec_started -= 1
     tray.on_recording_tick()
     assert wait_for(lambda: tray.recorder is None)
+
+
+def test_tray_shows_saving_progress(tray):
+    tray.start_recording("mic")
+    time.sleep(0.2)
+    tray.stop_recording()
+    QApplication.instance().processEvents()
+    assert tray.tray_icon.toolTip().startswith("Saving recording...")
+    assert wait_for(lambda: tray.recorder is None)
+    assert tray.tray_icon.toolTip() == "Simple Audio Recorder (Idle)"
+    assert tray.action_stop.text() == "Stop Recording"
+
+
+def test_saving_progress_updates_tooltip_and_menu(tray):
+    tray.on_save_progress(0.42)
+    assert tray.tray_icon.toolTip() == "Saving recording... 42%"
+    assert tray.action_stop.text() == "Saving... 42%"

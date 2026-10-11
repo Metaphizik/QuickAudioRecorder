@@ -27,6 +27,7 @@ def resource_path(relative_path):
 class SignalManager(QObject):
     recording_finished = pyqtSignal(str, str)
     saving = pyqtSignal()
+    progress = pyqtSignal(float)
     hotkey = pyqtSignal(str)
 
 class HotkeyEdit(QLineEdit):
@@ -295,6 +296,8 @@ class TrayApplication(QObject):
         self.signals = SignalManager()
         self.signals.recording_finished.connect(self.on_recording_finished)
         self.signals.saving.connect(self.on_saving)
+        self.signals.progress.connect(self.on_save_progress)
+        self.save_percent = -1
         self.signals.hotkey.connect(self.on_hotkey)
 
         # ticks while recording: elapsed time in the tooltip, auto stop
@@ -431,7 +434,8 @@ class TrayApplication(QObject):
             output_format=settings['format'],
             normalize=settings['normalize'],
             mono=settings['mono'],
-            on_finish_callback=finish_callback
+            on_finish_callback=finish_callback,
+            on_progress=self.signals.progress.emit
         )
         self.recorder.start()
         self.action_record_mic.setEnabled(False)
@@ -462,8 +466,35 @@ class TrayApplication(QObject):
         self.rec_timer.stop()
         # Encoding a long recording takes a while, show right away that the click worked
         self.action_stop.setEnabled(False)
-        self.tray_icon.setIcon(QIcon(self.icon_idle_path))
-        self.tray_icon.setToolTip("Saving recording...")
+        self.save_percent = -1
+        self.on_save_progress(0.0)
+
+    def on_save_progress(self, fraction):
+        percent = int(fraction * 100)
+        if percent == self.save_percent:
+            return
+        self.save_percent = percent
+        self.tray_icon.setIcon(self.saving_icon(percent))
+        self.tray_icon.setToolTip(f"Saving recording... {percent}%")
+        self.action_stop.setText(f"Saving... {percent}%")
+
+    @staticmethod
+    def saving_icon(percent):
+        # dim orange disc that fills up bright orange clockwise from the top,
+        # orange from the start so it never looks like the idle icon
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(120, 70, 10)))
+        painter.drawEllipse(4, 4, 56, 56)
+        painter.setBrush(QBrush(QColor(255, 150, 0)))
+        painter.drawPie(4, 4, 56, 56, 90 * 16, -int(360 * 16 * percent / 100))
+        painter.setBrush(QBrush(QColor(255, 255, 255)))
+        painter.drawEllipse(24, 24, 16, 16)
+        painter.end()
+        return QIcon(pix)
 
     def on_recording_finished(self, path, error):
         self.rec_timer.stop()
@@ -471,6 +502,7 @@ class TrayApplication(QObject):
         self.action_record_loop.setEnabled(True)
         self.action_record_both.setEnabled(True)
         self.action_stop.setEnabled(False)
+        self.action_stop.setText("Stop Recording")
         self.tray_icon.setIcon(QIcon(self.icon_idle_path))
         self.tray_icon.setToolTip("Simple Audio Recorder (Idle)")
         self.recorder = None

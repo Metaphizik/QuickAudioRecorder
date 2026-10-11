@@ -126,7 +126,7 @@ class AudioRecorder(threading.Thread):
     Orchestrates recording from Microphone, Loopback, or Both.
     """
     def __init__(self, mic_id, source_mode, output_folder, output_format="mp3", 
-                 normalize=False, mono=False, on_finish_callback=None):
+                 normalize=False, mono=False, on_finish_callback=None, on_progress=None):
         super().__init__()
         self.mic_id = mic_id
         self.source_mode = source_mode # "mic", "loopback", "both"
@@ -135,6 +135,7 @@ class AudioRecorder(threading.Thread):
         self.normalize = normalize
         self.mono = mono
         self.callback = on_finish_callback
+        self.on_progress = on_progress  # called with 0..1 while saving
         
         self.recording = False
         self.stop_event = threading.Event()
@@ -318,15 +319,35 @@ class AudioRecorder(threading.Thread):
             yield np.clip(mixed, -1.0, 1.0)
 
     def _write_output(self, sources, path):
-        samplerate, channels, _, _ = self._plan_mix(sources)
+        samplerate, channels, length, _ = self._plan_mix(sources)
+        per_source = self.normalize and len(sources) > 1
+
+        # progress over all passes: per-source peaks, mix peak, final write.
+        # Encoding is far slower than scanning for peaks, so it counts more
+        # (measured on a 30 min recording: mp3 ~25x, wav/flac ~3x a scan)
+        write_cost = 25 if self.output_format == "mp3" else 3
+        total = length * write_cost
+        if self.normalize:
+            total += length
+        if per_source:
+            total += sum(s.frames for s in sources)
+        done = 0
+
+        def tick(b, cost=1):
+            nonlocal done
+            done += len(b) * cost
+            if self.on_progress and total:
+                self.on_progress(min(done / total, 1.0))
+            return b
+
         source_gains = None
-        if self.normalize and len(sources) > 1:
+        if per_source:
             # Level mic and system audio first, otherwise loud system audio
             # sets the peak and a quiet mic stays quiet in the mix
             source_gains = []
             for s in sources:
                 s.seek(0)
-                peak = max((np.abs(b).max() for b in s.blocks(65536, dtype='float32')), default=0)
+                peak = max((np.abs(tick(b)).max() for b in s.blocks(65536, dtype='float32')), default=0)
                 source_gains.append(1.0 / peak if peak > 0 else 1.0)
 
         blocks = lambda: self._mixed_blocks(sources, source_gains)
@@ -336,7 +357,7 @@ class AudioRecorder(threading.Thread):
 
         gain = 1.0
         if self.normalize:
-            peak = max((np.abs(b).max() for b in blocks()), default=0)
+            peak = max((np.abs(tick(b)).max() for b in blocks()), default=0)
             if peak > 0:
                 gain = 0.99 / peak
 
@@ -348,6 +369,7 @@ class AudioRecorder(threading.Thread):
             encoder.set_quality(2)
             with open(path, "wb") as f_mp3:
                 for b in blocks():
+                    tick(b, write_cost)
                     pcm = (b * gain * 32767).clip(-32768, 32767).astype(np.int16)
                     f_mp3.write(encoder.encode(pcm.tobytes()))
                 f_mp3.write(encoder.flush())
@@ -355,7 +377,7 @@ class AudioRecorder(threading.Thread):
             # WAV or FLAC, soundfile picks the container from the extension
             with sf.SoundFile(path, 'w', samplerate=samplerate, channels=channels) as f_out:
                 for b in blocks():
-                    f_out.write(b * gain)
+                    f_out.write(tick(b, write_cost) * gain)
 
 def get_devices(include_loopback=False):
     try:
