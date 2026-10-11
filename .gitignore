@@ -24,3 +24,6 @@ settings.json
 # IDE
 .vscode/
 .idea/
+
+# Tests
+.pytest_cache/

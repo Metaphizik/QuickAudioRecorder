@@ -3,12 +3,13 @@ import os
 import json
 import shutil
 import tempfile
+import time
 from PyQt6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu, QMainWindow, 
                              QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QFileDialog, QMessageBox, QGroupBox, 
-                             QLineEdit, QFormLayout, QCheckBox)
+                             QLineEdit, QFormLayout, QCheckBox, QSpinBox)
 from PyQt6.QtGui import QIcon, QAction, QColor, QPixmap, QPainter, QBrush, QKeySequence
-from PyQt6.QtCore import pyqtSignal, QObject, Qt, QUrl, QMimeData, QDir
+from PyQt6.QtCore import pyqtSignal, QObject, Qt, QUrl, QMimeData, QDir, QEvent, QTimer
 import soundcard as sc
 import keyboard
 from audio_recorder import AudioRecorder, get_devices
@@ -25,6 +26,8 @@ def resource_path(relative_path):
 
 class SignalManager(QObject):
     recording_finished = pyqtSignal(str, str)
+    saving = pyqtSignal()
+    hotkey = pyqtSignal(str)
 
 class HotkeyEdit(QLineEdit):
     """
@@ -40,6 +43,14 @@ class HotkeyEdit(QLineEdit):
     def mousePressEvent(self, event):
         self.setFocus()
         super().mousePressEvent(event)
+
+    def event(self, event):
+        # Alt+<key> arrives as a shortcut first and never reaches keyPressEvent
+        # unless we claim it here (#3)
+        if event.type() == QEvent.Type.ShortcutOverride and self.hasFocus():
+            event.accept()
+            return True
+        return super().event(event)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -131,10 +142,12 @@ class SettingsWindow(QMainWindow):
         layout_folder_inner.addWidget(btn_browse)
         
         self.combo_fmt = QComboBox()
-        self.combo_fmt.addItems(["MP3", "WAV"])
+        self.combo_fmt.addItems(["MP3", "WAV", "FLAC"])
+        self.chk_mono = QCheckBox("Save as mono (half the size, good for voice)")
         
         layout_out.addRow("Folder:", layout_folder_inner)
         layout_out.addRow("Format:", self.combo_fmt)
+        layout_out.addRow("", self.chk_mono)
         group_out.setLayout(layout_out)
         layout.addWidget(group_out)
 
@@ -144,6 +157,14 @@ class SettingsWindow(QMainWindow):
         self.combo_left_click = QComboBox()
         self.combo_left_click.addItems(["Last Used", "Microphone", "Loopback", "Both"])
         layout_tray.addRow("Left Click Action:", self.combo_left_click)
+        self.spin_auto_stop = QSpinBox()
+        self.spin_auto_stop.setRange(0, 24 * 60)
+        self.spin_auto_stop.setSuffix(" min")
+        self.spin_auto_stop.setSpecialValueText("Off")
+        layout_tray.addRow("Stop Automatically After:", self.spin_auto_stop)
+        self.chk_notifications = QCheckBox("Show notifications (errors are always shown)")
+        self.chk_notifications.setChecked(True)
+        layout_tray.addRow(self.chk_notifications)
         group_tray.setLayout(layout_tray)
         layout.addWidget(group_tray)
 
@@ -220,7 +241,10 @@ class SettingsWindow(QMainWindow):
                 mode = data.get("tray_click_mode", "Last Used")
                 mode_idx = self.combo_left_click.findText(mode)
                 if mode_idx >= 0: self.combo_left_click.setCurrentIndex(mode_idx)
+                self.spin_auto_stop.setValue(data.get("auto_stop_min", 0))
+                self.chk_notifications.setChecked(data.get("notifications", True))
 
+                self.chk_mono.setChecked(data.get("mono", False))
                 self.chk_normalize.setChecked(data.get("normalize", False))
                 self.chk_clipboard.setChecked(data.get("clipboard", False))
                 self.chk_delete.setChecked(data.get("delete_after", False))
@@ -248,7 +272,10 @@ class SettingsWindow(QMainWindow):
             "device_id": self.combo_mic.currentData(),
             "output_folder": self.lbl_folder.text(),
             "format": self.combo_fmt.currentText(),
+            "mono": self.chk_mono.isChecked(),
             "tray_click_mode": self.combo_left_click.currentText(),
+            "auto_stop_min": self.spin_auto_stop.value(),
+            "notifications": self.chk_notifications.isChecked(),
             "normalize": self.chk_normalize.isChecked(),
             "clipboard": self.chk_clipboard.isChecked(),
             "delete_after": self.chk_delete.isChecked(),
@@ -267,6 +294,14 @@ class TrayApplication(QObject):
         
         self.signals = SignalManager()
         self.signals.recording_finished.connect(self.on_recording_finished)
+        self.signals.saving.connect(self.on_saving)
+        self.signals.hotkey.connect(self.on_hotkey)
+
+        # ticks while recording: elapsed time in the tooltip, auto stop
+        self.rec_timer = QTimer(self)
+        self.rec_timer.setInterval(1000)
+        self.rec_timer.timeout.connect(self.on_recording_tick)
+        self.rec_started = 0
 
         self.icon_idle_path = resource_path("icon_idle.png")
         self.icon_rec_path = resource_path("icon_rec.png")
@@ -282,7 +317,7 @@ class TrayApplication(QObject):
         self.settings_window = SettingsWindow()
         self.settings_window.settings_saved.connect(self.register_hotkeys)
         
-        self.tray_icon.showMessage("Ready", "Left-click to toggle recording.", QSystemTrayIcon.MessageIcon.Information, 2000)
+        self.notify("Ready", "Left-click to toggle recording.", QSystemTrayIcon.MessageIcon.Information, 2000)
         self.register_hotkeys()
 
     def generate_icons(self):
@@ -344,11 +379,23 @@ class TrayApplication(QObject):
         hk_both = settings.get("hk_both")
         hk_stop = settings.get("hk_stop")
         try:
-            if hk_mic: keyboard.add_hotkey(hk_mic, lambda: self.start_recording("mic"))
-            if hk_loop: keyboard.add_hotkey(hk_loop, lambda: self.start_recording("loopback"))
-            if hk_both: keyboard.add_hotkey(hk_both, lambda: self.start_recording("both"))
-            if hk_stop: keyboard.add_hotkey(hk_stop, self.stop_recording)
+            # keyboard runs callbacks on its own thread, hand them to the Qt thread
+            if hk_mic: keyboard.add_hotkey(hk_mic, lambda: self.signals.hotkey.emit("mic"))
+            if hk_loop: keyboard.add_hotkey(hk_loop, lambda: self.signals.hotkey.emit("loopback"))
+            if hk_both: keyboard.add_hotkey(hk_both, lambda: self.signals.hotkey.emit("both"))
+            if hk_stop: keyboard.add_hotkey(hk_stop, lambda: self.signals.hotkey.emit("stop"))
         except Exception as e: print(f"Failed to register hotkeys: {e}")
+
+    def on_hotkey(self, mode):
+        # a record hotkey pressed again stops the recording
+        if mode == "stop" or (self.recorder and self.recorder.is_alive()):
+            self.stop_recording()
+        else:
+            self.start_recording(mode)
+
+    def notify(self, title, msg, icon=QSystemTrayIcon.MessageIcon.Information, ms=2000):
+        if self.settings_window.chk_notifications.isChecked():
+            self.tray_icon.showMessage(title, msg, icon, ms)
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -383,6 +430,7 @@ class TrayApplication(QObject):
             output_folder=settings['output_folder'],
             output_format=settings['format'],
             normalize=settings['normalize'],
+            mono=settings['mono'],
             on_finish_callback=finish_callback
         )
         self.recorder.start()
@@ -391,13 +439,34 @@ class TrayApplication(QObject):
         self.action_record_both.setEnabled(False)
         self.action_stop.setEnabled(True)
         self.tray_icon.setIcon(QIcon(self.icon_rec_path)) 
-        self.tray_icon.setToolTip(f"Recording ({mode})...")
-        self.tray_icon.showMessage("Started", f"Recording {mode}", QSystemTrayIcon.MessageIcon.NoIcon, 1000)
+        self.tray_icon.setToolTip(f"Recording ({mode}) 00:00")
+        self.rec_started = time.monotonic()
+        self.rec_timer.start()
+        self.notify("Started", f"Recording {mode}", QSystemTrayIcon.MessageIcon.NoIcon, 1000)
+
+    def on_recording_tick(self):
+        elapsed = int(time.monotonic() - self.rec_started)
+        minutes, seconds = divmod(elapsed, 60)
+        self.tray_icon.setToolTip(f"Recording ({self.last_mode}) {minutes:02d}:{seconds:02d}")
+        limit = self.settings_window.get_settings()["auto_stop_min"]
+        if limit and elapsed >= limit * 60:
+            self.stop_recording()
 
     def stop_recording(self):
-        if self.recorder: self.recorder.stop()
+        if self.recorder and not self.recorder.stop_event.is_set():
+            self.recorder.stop()
+            # hotkeys call this from the keyboard thread, so update the UI via a signal
+            self.signals.saving.emit()
+
+    def on_saving(self):
+        self.rec_timer.stop()
+        # Encoding a long recording takes a while, show right away that the click worked
+        self.action_stop.setEnabled(False)
+        self.tray_icon.setIcon(QIcon(self.icon_idle_path))
+        self.tray_icon.setToolTip("Saving recording...")
 
     def on_recording_finished(self, path, error):
+        self.rec_timer.stop()
         self.action_record_mic.setEnabled(True)
         self.action_record_loop.setEnabled(True)
         self.action_record_both.setEnabled(True)
@@ -421,7 +490,6 @@ class TrayApplication(QObject):
                     new_path = os.path.join(temp_dir, os.path.basename(path))
                     if os.path.exists(new_path):
                         base, ext = os.path.splitext(new_path)
-                        import time
                         new_path = f"{base}_{int(time.time())}{ext}"
                     shutil.move(path, new_path)
                     final_path = new_path
@@ -440,7 +508,7 @@ class TrayApplication(QObject):
             except Exception as e:
                 msg += f"\nClipboard/Move error: {e}"
 
-        self.tray_icon.showMessage("Finished", msg, QSystemTrayIcon.MessageIcon.Information, 2000)
+        self.notify("Finished", msg, QSystemTrayIcon.MessageIcon.Information, 2000)
 
     def exit_app(self):
         if self.recorder: self.recorder.stop()

@@ -35,15 +35,22 @@ AI-generated PRs are not rejected on principle, but they tend to over-engineer a
 ## Development setup
 
 ```bash
-pip install PyQt6 soundcard soundfile numpy lameenc keyboard
+pip install PyQt6 soundcard sounddevice soundfile numpy lameenc keyboard
 python main.py
+```
+
+Run the tests before sending a PR:
+
+```bash
+pip install pytest
+python -m pytest
 ```
 
 For the standalone build:
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name QuickAudioRecorder main.py
+pyinstaller --noconsole --onefile --noupx --name QuickAudioRecorder main.py
 ```
 
 ## Review timeline

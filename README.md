@@ -36,20 +36,24 @@ https://github.com/user-attachments/assets/14238816-c1ee-4914-9211-5f0007bfe999
     -   🎤 **Microphone:** Record your voice.
     -   🔊 **System Audio:** Record what you hear (Loopback).
     -   🎙️+🔊 **Both:** Record both tracks simultaneously (mixed).
+-   **Output:** MP3, WAV or FLAC, optionally saved as mono for smaller voice clips.
 -   **Post-Processing:**
-    -   **Auto-Normalize:** Automatically adjusts volume to optimal levels after recording.
+    -   **Auto-Normalize:** Automatically adjusts volume to optimal levels after recording. In "Both" mode, mic and system audio are leveled separately first, so a quiet voice is not buried under loud system audio.
     -   **Clipboard Integration:** Automatically copies the file (or file path) to your clipboard.
     -   **Clean Workflow:** Option to move the file to a temp folder and copy it, keeping your desktop clean.
 -   **Control:**
     -   **Global Hotkeys:** Start/Stop recording from anywhere (e.g., `Ctrl+Alt+R`).
     -   **Tray Icon:** Left-click to toggle recording immediately.
-    -   **Visual Feedback:** Tray icon changes color when recording.
+    -   **Visual Feedback:** Tray icon changes color when recording, hover it to see how long you have been recording.
+    -   **Auto-Stop:** Optionally stop and save after a set number of minutes.
 
 ## Installation
 
 1.  Go to the [Releases](https://github.com/lukmay/QuickAudioRecorder/releases) page.
 2.  Download `QuickAudioRecorder.exe`.
 3.  Run it! (No installation required).
+
+The exe is built by [GitHub Actions](.github/workflows/release.yml) straight from the tagged source, and each release has a `.sha256` file to check the download against. Some antivirus scanners flag PyInstaller apps in general. If you would rather not trust a binary, [build it yourself](#build-from-source).
 
 ## Usage
 
@@ -63,11 +67,22 @@ https://github.com/user-attachments/assets/14238816-c1ee-4914-9211-5f0007bfe999
 
 ### Requirements
 -   Python 3.12+
--   `pip install PyQt6 soundcard soundfile numpy lameenc keyboard`
+-   `pip install PyQt6 soundcard sounddevice soundfile numpy lameenc keyboard`
+
+### Tests
+```bash
+pip install pytest
+python -m pytest
+```
+The tests use fake audio devices, so they run anywhere. If [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) is installed, `tests/test_cable.py` also records a real tone through the cable without touching your default speakers or microphone.
 
 ### Build from Source
 To create the standalone executable:
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name QuickAudioRecorder main.py
+pyinstaller --noconsole --onefile --noupx --name QuickAudioRecorder main.py
 ```
+
+## License
+
+[MIT](LICENSE)
