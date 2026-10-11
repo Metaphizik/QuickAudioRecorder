@@ -71,11 +71,24 @@ def test_both_with_different_device_rates(fake_sc, tmp_path):
     fake_sc.loop.rates = {48000}
     path, error = record(tmp_path, "both", output_format="wav")
     assert not error
-    data, sr = sf.read(path, always_2d=True)
+    assert sf.info(path).samplerate == 44100
+
+
+def test_mix_resamples_second_source(tmp_path):
+    import audio_recorder
+    a, b = tmp_path / "a.wav", tmp_path / "b.wav"
+    sf.write(a, 0.5 * np.sin(2 * np.pi * 440 * np.arange(44100 * 2) / 44100), 44100)
+    sf.write(b, 0.5 * np.sin(2 * np.pi * 1000 * np.arange(48000 * 2) / 48000), 48000)
+
+    rec = audio_recorder.AudioRecorder("x", "both", str(tmp_path), output_format="wav")
+    out = tmp_path / "out.wav"
+    with sf.SoundFile(a) as fa, sf.SoundFile(b) as fb:
+        rec._write_output([fa, fb], str(out))
+    data, sr = sf.read(out)
     assert sr == 44100
-    spectrum = np.abs(np.fft.rfft(data.mean(axis=1)))
+    spectrum = np.abs(np.fft.rfft(data))
     freqs = np.fft.rfftfreq(len(data), 1 / sr)
-    # the 48 kHz loopback must not come out pitched down
+    # the 48 kHz source must not come out pitched down
     assert spectrum[np.abs(freqs - 1000) < 3].max() > spectrum.max() * 0.3
 
 
