@@ -70,8 +70,8 @@ class RawRecorder(threading.Thread):
         self.channels = channels
         self.stop_event = threading.Event()
         self.error = None
-        # Frames written so far, so a device that dies after a while can be
-        # told apart from one that fails to start at all.
+        # Frames written so far: tells a device that died after a while from
+        # one that fails to start at all, the AudioRecorder needs that.
         self.frames = 0
 
     def _probe_params(self):
@@ -120,9 +120,9 @@ class RawRecorder(threading.Thread):
                             f_wav.write(data)
                             self.frames += len(data)
                 except Exception as e:
-                    # The device was probably unplugged. Keep the frames
-                    # written so far instead of throwing them away, the
-                    # AudioRecorder decides what to do with the file.
+                    # The device was probably unplugged. Keep the frames written
+                    # so far instead of throwing the whole recording away, the
+                    # AudioRecorder decides whether to reconnect or to save.
                     self.error = str(e) or type(e).__name__
         except Exception as e:
             self.error = str(e) or type(e).__name__
@@ -136,10 +136,16 @@ class RawRecorder(threading.Thread):
 class AudioRecorder(threading.Thread):
     """
     Orchestrates recording from Microphone, Loopback, or Both.
+
+    If a device disappears mid-recording:
+      - reconnect=True  -> wait for the device, resume into a new segment,
+        all segments are concatenated at the end;
+      - reconnect=False -> finalize and save what was captured right away.
+    on_notify_callback reports both events immediately.
     """
     def __init__(self, mic_id, source_mode, output_folder, output_format="mp3", 
                  normalize=False, mono=False, on_finish_callback=None, on_progress=None,
-                 on_notify_callback=None):
+                 reconnect=True, on_notify_callback=None):
         super().__init__()
         self.mic_id = mic_id
         self.source_mode = source_mode # "mic", "loopback", "both"
@@ -149,8 +155,11 @@ class AudioRecorder(threading.Thread):
         self.mono = mono
         self.callback = on_finish_callback
         self.on_progress = on_progress  # called with 0..1 while saving
-        self.notify_callback = on_notify_callback  # mid-recording events
-        
+        self.reconnect = reconnect
+        self.notify_callback = on_notify_callback
+
+        # name of the mic in use: the id is gone after a replug
+        self.mic_name = None
         self.recording = False
         self.stop_event = threading.Event()
         self.error_message = None
@@ -158,7 +167,7 @@ class AudioRecorder(threading.Thread):
         
         # Temp files
         self.temp_files = []
-        self.recorders = []
+        self.sources = []
 
     def _get_device(self, is_loopback):
         if is_loopback:
@@ -175,17 +184,36 @@ class AudioRecorder(threading.Thread):
                 )
             return loopback_mic
         else:
+            return self._get_mic_device()
+
+    def _get_mic_device(self):
+        # The saved id is stable while the device stays on the same port,
+        # after a replug it may change, so fall back to the name.
+        first_error = None
+        try:
+            dev = sc.get_microphone(self.mic_id, include_loopback=False)
+            if dev is not None:
+                return dev
+        except Exception as e:
+            first_error = e
+
+        if self.mic_name:
             try:
-                return sc.get_microphone(self.mic_id, include_loopback=False)
-            except Exception as e:
-                available = [m.name for m in sc.all_microphones()]
-                raise Exception(
-                    f"Microphone '{self.mic_id}' not found ({e}). "
-                    f"Available: {available}"
-                ) from e
+                mics = sc.all_microphones(include_loopback=False)
+                dev = next((m for m in mics if m.name == self.mic_name), None)
+                if dev is not None:
+                    return dev
+            except Exception:
+                pass
+
+        available = [m.name for m in sc.all_microphones()]
+        detail = f" ({first_error})" if first_error else ""
+        raise Exception(
+            f"Microphone '{self.mic_id or self.mic_name}' not found{detail}. "
+            f"Available: {available}"
+        )
 
     def _notify(self, message):
-        """Report a mid-recording event to the UI (device lost)."""
         if self.notify_callback:
             try:
                 self.notify_callback(message)
@@ -193,88 +221,140 @@ class AudioRecorder(threading.Thread):
                 pass
         print(message)
 
-    def _label(self, recorder):
-        if self.source_mode == "loopback":
-            return "System audio"
-        if self.source_mode == "both" and recorder is self.recorders[-1]:
-            return "System audio"
-        return "Microphone"
+    def _new_recorder(self, src, device):
+        path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+        self.temp_files.append(path)
+        src["files"].append(path)
+        if not src["is_loop"]:
+            # remember the name: it is what a reconnect can match on
+            self.mic_name = device.name
+        rec = RawRecorder(device, path,
+                          samplerate=src["samplerate"] or 44100,
+                          channels=src["channels"] or 2)
+        src["rec"] = rec
+        return rec
+
+    def _start_recorder(self, src, device):
+        rec = self._new_recorder(src, device)
+        rec.start()
+        return rec
 
     def run(self):
         self.recording = True
         self.error_message = None
         self.temp_files = []
-        self.recorders = []
-        
+        self.sources = []
+        recorder_errors = []
+
         try:
             # 1. Setup Recorders
             if self.source_mode == "both":
-                # Need two recorders
-                dev_mic = self._get_device(is_loopback=False)
-                dev_loop = self._get_device(is_loopback=True)
-                
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                t2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1, t2]
-                
-                self.recorders.append(RawRecorder(dev_mic, t1))
-                self.recorders.append(RawRecorder(dev_loop, t2))
-                
+                modes = [False, True]  # is_loopback flags: mic + system audio
             elif self.source_mode == "loopback":
-                dev = self._get_device(is_loopback=True)
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1]
-                self.recorders.append(RawRecorder(dev, t1))
-                
+                modes = [True]
             else: # mic
-                dev = self._get_device(is_loopback=False)
-                t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-                self.temp_files = [t1]
-                self.recorders.append(RawRecorder(dev, t1))
+                modes = [False]
 
-            # Probe before starting so both sources start close together.
-            # The loopback gets asked for the mic's rate first, so mixing
-            # rarely has to resample.
-            for r in self.recorders:
-                if r is not self.recorders[0]:
-                    r.samplerate = self.recorders[0].samplerate
+            for is_loop in modes:
+                dev = self._get_device(is_loop)
+                src = {"is_loop": is_loop, "files": [], "rec": None,
+                       "failed_starts": 0, "samplerate": None, "channels": None,
+                       "lost": False}
+                self.sources.append(src)
+                rec = self._new_recorder(src, dev)
+
+                # Probe before starting so both sources start close together.
+                # The loopback gets asked for the mic's rate first, so mixing
+                # rarely has to resample.
+                if src is not self.sources[0]:
+                    rec.samplerate = self.sources[0]["rec"].samplerate
                 try:
-                    r.probe()
+                    rec.probe()
                 except Exception as e:
-                    raise Exception(f"Recording failed on '{r.device.name}': {e}") from e
+                    raise Exception(f"Recording failed on '{rec.device.name}': {e}") from e
+                # Keep the probed values: a reconnected segment has to match
+                # them, otherwise the segments can't be concatenated.
+                src["samplerate"], src["channels"] = rec.samplerate, rec.channels
 
             print(f"Starting recording mode: {self.source_mode}")
 
             # 2. Start Recording
-            for r in self.recorders:
-                r.start()
-            
-            # 3. Wait for the stop signal, watching for a device that goes away
+            for src in self.sources:
+                src["rec"].start()
+
+            # 3. Wait for the stop signal, watching for lost devices
             while not self.stop_event.is_set():
                 self.stop_event.wait(0.5)
                 if self.stop_event.is_set():
                     break
-                for r in self.recorders:
-                    if r.error is None and r.is_alive():
+
+                for src in self.sources:
+                    rec = src["rec"]
+                    if rec is None:
                         continue
-                    # A device disappeared mid-recording: stop and save what
-                    # was captured instead of dropping the whole recording.
-                    r.stop()
-                    self._notify(f"{self._label(r)} disconnected - saving recording...")
-                    self.stop_event.set()
-                    break
+                    if rec.error is None and rec.is_alive():
+                        continue
+
+                    # The device died (or the recorder crashed)
+                    rec.stop()
+                    if rec.error:
+                        recorder_errors.append(rec.error)
+                    src["rec"] = None
+
+                    label = "System audio" if src["is_loop"] else "Microphone"
+
+                    # Count instant failures (device "present" but dies right
+                    # away) to avoid an endless reconnect loop.
+                    if rec.frames == 0:
+                        src["failed_starts"] += 1
+                    else:
+                        src["failed_starts"] = 0
+
+                    if src["failed_starts"] >= 5:
+                        self._notify(f"{label} keeps failing - saving recording...")
+                        src["lost"] = True
+                        self.stop_event.set()
+                        break
+
+                    if not self.reconnect:
+                        # Finalize immediately: keep what was recorded.
+                        self._notify(f"{label} disconnected - saving recording...")
+                        src["lost"] = True
+                        self.stop_event.set()
+                        break
+
+                    self._notify(f"{label} disconnected - waiting for reconnection...")
+
+                    while not self.stop_event.is_set():
+                        self.stop_event.wait(1.0)
+                        if self.stop_event.is_set():
+                            break
+                        try:
+                            dev = self._get_device(src["is_loop"])
+                            self._start_recorder(src, dev)
+                            self._notify(f"{label} reconnected - recording resumed.")
+                            break
+                        except Exception:
+                            continue
+
+                    if self.stop_event.is_set():
+                        # stopped by the user, or the device never came back
+                        if src["rec"] is None:
+                            src["lost"] = True
+                        break
 
             # 4. Stop Recording
-            recorder_errors = []
-            for r in self.recorders:
-                if not r.stop() and r.error is None:
-                    # A device that stopped answering must not hang the app
-                    r.error = "Recorder thread did not stop (device hung)."
-                if r.error:
-                    recorder_errors.append(r.error)
+            for src in self.sources:
+                rec = src["rec"]
+                if rec is None:
+                    continue
+                if not rec.stop() and rec.error is None:
+                    rec.error = "Recorder thread did not stop (device hung)."
+                if rec.error:
+                    recorder_errors.append(rec.error)
+                src["rec"] = None
 
-            # A lost device is not a reason to throw the recording away: keep
-            # whatever was captured and let the caller warn about it.
+            # Keep whatever was captured instead of dropping the whole file.
             has_audio = any(
                 os.path.exists(t) and os.path.getsize(t) > 44  # > WAV header
                 for t in self.temp_files
@@ -283,7 +363,25 @@ class AudioRecorder(threading.Thread):
                 reason = recorder_errors[0] if recorder_errors else "no audio captured"
                 raise Exception(f"Recording failed: {reason}")
 
-            # 5. Mix, normalize and encode block by block. Loading a long
+            # 5. A reconnected device leaves several segments, glue them back
+            source_wavs = []
+            for src in self.sources:
+                wavs = [f for f in src["files"]
+                        if os.path.exists(f) and os.path.getsize(f) > 44]
+                if not wavs:
+                    continue
+                if len(wavs) == 1:
+                    source_wavs.append(wavs[0])
+                else:
+                    combined = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+                    self._concat_segments(wavs, combined, src["samplerate"], src["channels"])
+                    self.temp_files.append(combined)
+                    source_wavs.append(combined)
+
+            if not source_wavs:
+                raise Exception("Recording failed: no audio captured")
+
+            # 6. Mix, normalize and encode block by block. Loading a long
             # recording at once needs several GB of RAM (see #7).
             if not os.path.exists(self.output_folder):
                 os.makedirs(self.output_folder)
@@ -292,16 +390,18 @@ class AudioRecorder(threading.Thread):
             filename = f"Recording_{timestamp}.{self.output_format}"
             self.final_filepath = os.path.join(self.output_folder, filename)
 
-            sources = [sf.SoundFile(t) for t in self.temp_files]
+            sources = [sf.SoundFile(t) for t in source_wavs]
             try:
                 self._write_output(sources, self.final_filepath)
             finally:
                 for s in sources:
                     s.close()
 
-            # Saved, but the recording is shorter than the user asked for
-            if recorder_errors:
-                self.error_message = f"Device disconnected, partial recording saved: {recorder_errors[0]}"
+            # Saved successfully. Only complain if a device was actually
+            # lost for good, a reconnect means the recording is complete.
+            if any(src["lost"] for src in self.sources):
+                reason = recorder_errors[0] if recorder_errors else "device lost"
+                self.error_message = f"Device disconnected, partial recording saved: {reason}"
 
         except Exception as e:
             self.error_message = str(e)
@@ -320,6 +420,19 @@ class AudioRecorder(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
+
+    @staticmethod
+    def _concat_segments(files, out_file, samplerate, channels):
+        """Glue the segments of one source back into a single WAV file,
+        block by block so a long recording doesn't have to fit in RAM."""
+        with sf.SoundFile(out_file, 'w', samplerate=samplerate, channels=channels) as f_out:
+            for path in files:
+                try:
+                    with sf.SoundFile(path) as f_in:
+                        for block in f_in.blocks(65536, dtype='float32', always_2d=True):
+                            f_out.write(block)
+                except Exception as e:
+                    print(f"Skipping unreadable segment {path}: {e}")
 
     def _plan_mix(self, sources):
         """Output rate, channels and length, plus a read ratio per source.

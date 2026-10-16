@@ -29,7 +29,7 @@ class SignalManager(QObject):
     saving = pyqtSignal()
     progress = pyqtSignal(float)
     hotkey = pyqtSignal(str)
-    # mid-recording events (a device went away), from the recorder thread
+    # mid-recording events (device lost / reconnected), from the recorder thread
     recording_notice = pyqtSignal(str)
 
 class HotkeyEdit(QLineEdit):
@@ -187,6 +187,17 @@ class SettingsWindow(QMainWindow):
         group_post.setLayout(layout_post)
         layout.addWidget(group_post)
 
+        # Device Handling
+        group_dev = QGroupBox("Device Handling")
+        layout_dev = QVBoxLayout()
+        self.chk_reconnect = QCheckBox("Auto-reconnect after device unplug (keep recording)")
+        self.chk_reconnect.setChecked(True)
+        self.chk_reconnect.setToolTip("Waits for the device to come back and continues recording. "
+                                     "Off: the recording is saved as soon as the device is gone.")
+        layout_dev.addWidget(self.chk_reconnect)
+        group_dev.setLayout(layout_dev)
+        layout.addWidget(group_dev)
+
         # Hotkeys
         group_hotkeys = QGroupBox("Global Hotkeys")
         layout_hotkeys = QFormLayout()
@@ -248,6 +259,7 @@ class SettingsWindow(QMainWindow):
                 self.chk_notifications.setChecked(data.get("notifications", True))
 
                 self.chk_mono.setChecked(data.get("mono", False))
+                self.chk_reconnect.setChecked(data.get("reconnect", True))
                 self.chk_normalize.setChecked(data.get("normalize", False))
                 self.chk_clipboard.setChecked(data.get("clipboard", False))
                 self.chk_delete.setChecked(data.get("delete_after", False))
@@ -276,6 +288,7 @@ class SettingsWindow(QMainWindow):
             "output_folder": self.lbl_folder.text(),
             "format": self.combo_fmt.currentText(),
             "mono": self.chk_mono.isChecked(),
+            "reconnect": self.chk_reconnect.isChecked(),
             "tray_click_mode": self.combo_left_click.currentText(),
             "auto_stop_min": self.spin_auto_stop.value(),
             "notifications": self.chk_notifications.isChecked(),
@@ -439,6 +452,7 @@ class TrayApplication(QObject):
             mono=settings['mono'],
             on_finish_callback=finish_callback,
             on_progress=self.signals.progress.emit,
+            reconnect=settings['reconnect'],
             on_notify_callback=self.signals.recording_notice.emit
         )
         self.recorder.start()
@@ -501,7 +515,7 @@ class TrayApplication(QObject):
         return QIcon(pix)
 
     def on_recording_notice(self, message):
-        """Mid-recording events (a device went away). Shown even with
+        """Mid-recording events (device lost / reconnected). Shown even with
         notifications off: the recording is about to end early."""
         self.tray_icon.showMessage("Recording", message, QSystemTrayIcon.MessageIcon.Information, 3000)
 
@@ -517,7 +531,7 @@ class TrayApplication(QObject):
         self.recorder = None
         
         # A partially saved recording comes back with both a path and an
-        # error: keep the file and warn instead of dropping it.
+        # error: keep the file and just warn instead of dropping it.
         if error and not (path and os.path.exists(path)):
             self.tray_icon.showMessage("Error", f"Recording failed: {error}", QSystemTrayIcon.MessageIcon.Critical, 4000)
             return

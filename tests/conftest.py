@@ -28,8 +28,9 @@ class FakeStream:
         return False
 
     def record(self, numframes):
-        # the device is unplugged in the middle of the recording
-        if self.device.die_after is not None and self.pos >= self.device.die_after:
+        # the device is unplugged: die once, then pretend it was replugged
+        if self.device.gone or (self.device.die_after is not None
+                                and self.pos >= self.device.die_after):
             self.device.die_after = None
             raise RuntimeError("device lost")
         # pace like a real device so a recording thread doesn't spin
@@ -56,8 +57,9 @@ class FakeDevice:
         self.fail_with = fail_with
         self.rates = rates
         # unplug behaviour: die_after = frames of audio before the device is
-        # lost mid-recording
+        # lost, gone = unplugged and never seen again
         self.die_after = die_after
+        self.gone = False
 
     def recorder(self, samplerate, channels=None, blocksize=None):
         if self.rates is not None and samplerate not in self.rates:
@@ -72,13 +74,23 @@ def fake_sc(monkeypatch):
     speaker = types.SimpleNamespace(name="Fake Speakers", id="spk")
     loop = FakeDevice("Fake Speakers", freq=1000.0, isloopback=True)
 
+    def list_mics(include_loopback=False):
+        mics = [mic, loop] if include_loopback else [mic]
+        # an unplugged device is simply not there any more
+        return [m for m in mics if not m.gone]
+
+    def get_mic(device_id, include_loopback=False):
+        if mic.gone:
+            raise RuntimeError(f"Microphone '{device_id}' not found")
+        return mic
+
     fake = types.SimpleNamespace(
         mic=mic,
         loop=loop,
         default_speaker=lambda: speaker,
         default_microphone=lambda: mic,
-        all_microphones=lambda include_loopback=False: [mic, loop] if include_loopback else [mic],
-        get_microphone=lambda id, include_loopback=False: mic,
+        all_microphones=list_mics,
+        get_microphone=get_mic,
     )
     monkeypatch.setattr(audio_recorder, "sc", fake)
     return fake

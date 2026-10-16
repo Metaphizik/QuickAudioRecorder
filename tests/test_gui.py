@@ -120,3 +120,17 @@ def test_saving_progress_updates_tooltip_and_menu(tray):
     tray.on_save_progress(0.42)
     assert tray.tray_icon.toolTip() == "Saving recording... 42%"
     assert tray.action_stop.text() == "Saving... 42%"
+
+
+def test_reconnect_setting_round_trips(tray):
+    import json
+    tray.settings_window.chk_reconnect.setChecked(False)
+    data = tray.settings_window.get_settings()
+    assert data["reconnect"] is False
+    with open("settings.json", "w") as f:
+        json.dump(data, f)
+
+    fresh = gui.SettingsWindow()
+    assert fresh.chk_reconnect.isChecked() is False
+    fresh.chk_reconnect.setChecked(True)
+    assert fresh.get_settings()["reconnect"] is True
