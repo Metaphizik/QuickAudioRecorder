@@ -70,6 +70,9 @@ class RawRecorder(threading.Thread):
         self.channels = channels
         self.stop_event = threading.Event()
         self.error = None
+        # Frames written so far, so a device that dies after a while can be
+        # told apart from one that fails to start at all.
+        self.frames = 0
 
     def _probe_params(self):
         """Find working (samplerate, channels) for this device."""
@@ -110,23 +113,33 @@ class RawRecorder(threading.Thread):
         try:
             samplerate, channels = self.samplerate, self.channels
             with sf.SoundFile(self.filepath, mode='w', samplerate=samplerate, channels=channels) as f_wav:
-                with self.device.recorder(samplerate=samplerate, channels=channels) as mic:
-                    while not self.stop_event.is_set():
-                        data = mic.record(numframes=2048)
-                        f_wav.write(data)
+                try:
+                    with self.device.recorder(samplerate=samplerate, channels=channels) as mic:
+                        while not self.stop_event.is_set():
+                            data = mic.record(numframes=2048)
+                            f_wav.write(data)
+                            self.frames += len(data)
+                except Exception as e:
+                    # The device was probably unplugged. Keep the frames
+                    # written so far instead of throwing them away, the
+                    # AudioRecorder decides what to do with the file.
+                    self.error = str(e) or type(e).__name__
         except Exception as e:
-            self.error = str(e)
+            self.error = str(e) or type(e).__name__
 
-    def stop(self):
+    def stop(self, timeout=5):
         self.stop_event.set()
-        self.join()
+        self.join(timeout=timeout)
+        # False means the device hung and the thread is still stuck in it
+        return not self.is_alive()
 
 class AudioRecorder(threading.Thread):
     """
     Orchestrates recording from Microphone, Loopback, or Both.
     """
     def __init__(self, mic_id, source_mode, output_folder, output_format="mp3", 
-                 normalize=False, mono=False, on_finish_callback=None, on_progress=None):
+                 normalize=False, mono=False, on_finish_callback=None, on_progress=None,
+                 on_notify_callback=None):
         super().__init__()
         self.mic_id = mic_id
         self.source_mode = source_mode # "mic", "loopback", "both"
@@ -136,6 +149,7 @@ class AudioRecorder(threading.Thread):
         self.mono = mono
         self.callback = on_finish_callback
         self.on_progress = on_progress  # called with 0..1 while saving
+        self.notify_callback = on_notify_callback  # mid-recording events
         
         self.recording = False
         self.stop_event = threading.Event()
@@ -169,6 +183,22 @@ class AudioRecorder(threading.Thread):
                     f"Microphone '{self.mic_id}' not found ({e}). "
                     f"Available: {available}"
                 ) from e
+
+    def _notify(self, message):
+        """Report a mid-recording event to the UI (device lost)."""
+        if self.notify_callback:
+            try:
+                self.notify_callback(message)
+            except Exception:
+                pass
+        print(message)
+
+    def _label(self, recorder):
+        if self.source_mode == "loopback":
+            return "System audio"
+        if self.source_mode == "both" and recorder is self.recorders[-1]:
+            return "System audio"
+        return "Microphone"
 
     def run(self):
         self.recording = True
@@ -219,16 +249,41 @@ class AudioRecorder(threading.Thread):
             for r in self.recorders:
                 r.start()
             
-            # Wait for stop signal
-            self.stop_event.wait()
-            
-            # 3. Stop Recording
-            for r in self.recorders:
-                r.stop()
-                if r.error:
-                    raise Exception(f"Recording failed on '{r.device.name}': {r.error}")
+            # 3. Wait for the stop signal, watching for a device that goes away
+            while not self.stop_event.is_set():
+                self.stop_event.wait(0.5)
+                if self.stop_event.is_set():
+                    break
+                for r in self.recorders:
+                    if r.error is None and r.is_alive():
+                        continue
+                    # A device disappeared mid-recording: stop and save what
+                    # was captured instead of dropping the whole recording.
+                    r.stop()
+                    self._notify(f"{self._label(r)} disconnected - saving recording...")
+                    self.stop_event.set()
+                    break
 
-            # 4. Mix, normalize and encode block by block. Loading a long
+            # 4. Stop Recording
+            recorder_errors = []
+            for r in self.recorders:
+                if not r.stop() and r.error is None:
+                    # A device that stopped answering must not hang the app
+                    r.error = "Recorder thread did not stop (device hung)."
+                if r.error:
+                    recorder_errors.append(r.error)
+
+            # A lost device is not a reason to throw the recording away: keep
+            # whatever was captured and let the caller warn about it.
+            has_audio = any(
+                os.path.exists(t) and os.path.getsize(t) > 44  # > WAV header
+                for t in self.temp_files
+            )
+            if not has_audio:
+                reason = recorder_errors[0] if recorder_errors else "no audio captured"
+                raise Exception(f"Recording failed: {reason}")
+
+            # 5. Mix, normalize and encode block by block. Loading a long
             # recording at once needs several GB of RAM (see #7).
             if not os.path.exists(self.output_folder):
                 os.makedirs(self.output_folder)
@@ -243,6 +298,10 @@ class AudioRecorder(threading.Thread):
             finally:
                 for s in sources:
                     s.close()
+
+            # Saved, but the recording is shorter than the user asked for
+            if recorder_errors:
+                self.error_message = f"Device disconnected, partial recording saved: {recorder_errors[0]}"
 
         except Exception as e:
             self.error_message = str(e)
