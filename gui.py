@@ -29,8 +29,7 @@ class SignalManager(QObject):
     saving = pyqtSignal()
     progress = pyqtSignal(float)
     hotkey = pyqtSignal(str)
-    # mid-recording events (a device went away), from the recorder thread
-    recording_notice = pyqtSignal(str)
+    recording_notice = pyqtSignal(str)  # device lost while recording
 
 class HotkeyEdit(QLineEdit):
     """
@@ -439,7 +438,7 @@ class TrayApplication(QObject):
             mono=settings['mono'],
             on_finish_callback=finish_callback,
             on_progress=self.signals.progress.emit,
-            on_notify_callback=self.signals.recording_notice.emit
+            on_notice=self.signals.recording_notice.emit
         )
         self.recorder.start()
         self.action_record_mic.setEnabled(False)
@@ -501,9 +500,9 @@ class TrayApplication(QObject):
         return QIcon(pix)
 
     def on_recording_notice(self, message):
-        """Mid-recording events (a device went away). Shown even with
-        notifications off: the recording is about to end early."""
-        self.tray_icon.showMessage("Recording", message, QSystemTrayIcon.MessageIcon.Information, 3000)
+        # the recorder stopped itself, shown even with notifications off
+        self.tray_icon.showMessage("Recording", message, QSystemTrayIcon.MessageIcon.Warning, 3000)
+        self.on_saving()
 
     def on_recording_finished(self, path, error):
         self.rec_timer.stop()
@@ -516,8 +515,7 @@ class TrayApplication(QObject):
         self.tray_icon.setToolTip("Simple Audio Recorder (Idle)")
         self.recorder = None
         
-        # A partially saved recording comes back with both a path and an
-        # error: keep the file and warn instead of dropping it.
+        # a partial recording comes back with a path and an error, keep it and warn
         if error and not (path and os.path.exists(path)):
             self.tray_icon.showMessage("Error", f"Recording failed: {error}", QSystemTrayIcon.MessageIcon.Critical, 4000)
             return

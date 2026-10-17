@@ -46,7 +46,7 @@ https://github.com/user-attachments/assets/14238816-c1ee-4914-9211-5f0007bfe999
     -   **Tray Icon:** Left-click to toggle recording immediately.
     -   **Visual Feedback:** Tray icon turns red while recording (hover it to see how long) and orange while saving, filling up as the file gets written.
     -   **Auto-Stop:** Optionally stop and save after a set number of minutes.
--   **Unplug Safety:** If a device disappears in the middle of a recording, what was captured up to that moment is saved instead of being thrown away, and the tray tells you what happened. In "Both" mode the mix keeps whatever the surviving track recorded.
+-   **Unplug Safety:** If a device is lost mid-recording (unplugged mic, headset out of range), the recording stops and everything captured up to that point is saved. The tray shows which device was lost.
 
 ## Installation
 

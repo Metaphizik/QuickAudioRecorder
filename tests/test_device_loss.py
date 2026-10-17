@@ -10,15 +10,13 @@ from conftest import dominant_freq, record
 
 
 def test_unplug_keeps_the_partial_recording(fake_sc, tmp_path):
-    fake_sc.mic.die_after = 44100  # dies after a fraction of a second
+    fake_sc.mic.die_after = 44100
     path, error = record(tmp_path, "mic", seconds=2.0, output_format="wav")
 
-    assert os.path.exists(path), "the audio captured before the unplug is gone"
     data, sr = sf.read(path)
-    assert len(data) > 0
+    assert len(data) >= 44100, "the audio captured before the unplug is gone"
     assert abs(dominant_freq(data, sr) - 440) < 5
-    assert "disconnected" in error.lower()
-    assert "partial recording saved" in error.lower()
+    assert "stopped early" in error
 
 
 def test_recording_stops_by_itself_when_the_device_goes(fake_sc, tmp_path):
@@ -37,16 +35,22 @@ def test_recording_stops_by_itself_when_the_device_goes(fake_sc, tmp_path):
     rec.start()
     assert done.wait(10), "the recording kept running after the device was lost"
     assert os.path.exists(result["path"])
-    assert "partial recording saved" in result["error"].lower()
+    assert "stopped early" in result["error"]
 
 
 def test_unplug_in_both_mode_still_saves_the_system_audio(fake_sc, tmp_path):
     fake_sc.mic.die_after = 44100
     path, error = record(tmp_path, "both", seconds=2.0, output_format="wav")
 
-    assert os.path.exists(path)
     data, sr = sf.read(path, always_2d=True)
-    # the system audio was recorded until the mic went away, its tone is
-    # still the loudest thing in the mix
+    # the system audio ran on until the recording stopped, so it dominates the mix
     assert abs(dominant_freq(data, sr) - 1000) < 5
-    assert "partial recording saved" in error.lower()
+    assert "stopped early" in error
+
+
+def test_unplug_before_any_audio_still_fails(fake_sc, tmp_path):
+    fake_sc.mic.die_after = 0
+    path, error = record(tmp_path, "mic", output_format="wav")
+
+    assert not path
+    assert "device lost" in error

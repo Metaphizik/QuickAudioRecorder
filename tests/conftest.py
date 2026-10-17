@@ -28,9 +28,7 @@ class FakeStream:
         return False
 
     def record(self, numframes):
-        # the device is unplugged in the middle of the recording
         if self.device.die_after is not None and self.pos >= self.device.die_after:
-            self.device.die_after = None
             raise RuntimeError("device lost")
         # pace like a real device so a recording thread doesn't spin
         time.sleep(numframes / self.samplerate / self.device.speed)
@@ -55,9 +53,7 @@ class FakeDevice:
         self.speed = speed
         self.fail_with = fail_with
         self.rates = rates
-        # unplug behaviour: die_after = frames of audio before the device is
-        # lost mid-recording
-        self.die_after = die_after
+        self.die_after = die_after  # frames recorded before it gets unplugged
 
     def recorder(self, samplerate, channels=None, blocksize=None):
         if self.rates is not None and samplerate not in self.rates:
